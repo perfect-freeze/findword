@@ -1,0 +1,254 @@
+#!/bin/bash
+# no glob explode
+GLOBIGNORE="*"
+
+if [ -f ~/.findwordrc ]; then
+	source ~/.findwordrc
+fi
+
+# defaults
+DEFAULT_log_file="findword.log"
+DEFAULT_confirm_remove_log=1
+DEFAULT_remove_log=1
+DEFAULT_ignore_names=("*.jpg" "*.gif" "*.gz*" "*.dump*" "*.tsv" "*.csv")
+DEFAULT_ignore_paths=(".svn")
+DEFAULT_rm_command="rm -i"
+
+# settings
+: ${log_file:=$DEFAULT_log_file}
+
+: ${confirm_remove_log:=$DEFAULT_confirm_remove_log}
+: ${remove_log:=$DEFAULT_remove_log}
+: ${ignore_names:=${DEFAULT_ignore_names[@]}}
+: ${ignore_paths:=${DEFAULT_ignore_paths[@]}}
+: ${rm_command:=$DEFAULT_rm_command}
+
+help_mode=1
+error_mode=0
+run_level=0
+debug_mode=0
+grep_mode=0
+
+find_option_list=()
+grep_option_list=()
+findword_add_find_option() {
+	while [ $# -gt 0 ]; do
+		find_option_list[${#find_option_list[*]}]=$1
+		shift
+	done
+}
+findword_add_grep_option() {
+	while [ $# -gt 0 ]; do
+		grep_option_list[${#grep_option_list[*]}]=$1
+		shift
+	done
+}
+
+convert_encoding=0
+while [ $# -gt 0 ]; do
+	case $1 in
+		-*)
+			case $1 in
+				-e | --regexp)
+					shift
+					grep_pattern=$1
+					grep_mode=0
+					help_mode=0
+					;;
+				-f | --file)
+					shift
+					grep_pattern_file=$1
+					grep_mode=1
+					help_mode=0
+					;;
+				-r | --remove-log)
+					remove_log=1
+					;;
+				-s | --save-log)
+					remove_log=0
+					;;
+				-i | --confirm-remove)
+					confirm_remove_log=1
+					;;
+				-h | --help)
+					help_mode=1
+					break
+					;;
+				-n | --ignore-name)
+					shift
+					ignore_pattern=$1
+					ignore_names[${#ignore_names[*]}]=$ignore_pattern
+					;;
+				-p | --ignore-path)
+					shift
+					ignore_pattern=$1
+					ignore_paths[${#ignore_paths[*]}]=$ignore_pattern
+					;;
+				-l | --list-files)
+					run_level=1
+					debug_mode=1
+					;;
+				--ignore-case)
+					findword_add_grep_option "-i"
+					;;
+				--debug)
+					debug_mode=1
+					;;
+				*)
+					echo unknown option $1.
+					error_mode=1
+					;;
+			esac
+			;;
+		*)
+			grep_pattern=$1
+			help_mode=0
+			;;
+	esac
+	shift
+done
+
+if [ $help_mode -eq 1 -o $error_mode -eq 1 ]; then
+	echo findword help
+	echo 'find files, and grep pattern'
+	echo usage:
+	echo 'findword [options] pattern'
+	echo options
+	echo -e, --eval-pattern PATTERN
+	echo '    use PATTERN to grep pattern'
+	echo -f, --file FILE
+	echo '    read PATTERN from file'
+	echo -r, --remove-log
+	echo '    if log file exists then replace'
+	echo -s, --save-log
+	echo '    if log file exists then save'
+	echo -i, --confirm-remove
+	echo '    if log file exists then show confirm dialog'
+	echo -n, --ignore-name name
+	echo '    ignore file name'
+	echo -p, --ignore-path path
+	echo '    ignore file path. add prefix "*/"'
+	echo -l, --list-files
+	echo '    execute only find, no grep and show file list'
+	echo -h, --help
+	echo '    this message'
+	echo --debug
+	echo '    show execute command'
+	exit
+fi
+
+if [ $debug_mode -eq 0 -a -e $log_file ]; then
+	if [ $confirm_remove_log -eq 1 ]; then
+		echo log file [ $log_file ] exists.
+		head -n 3 $log_file
+		wc -l $log_file
+		read -p "[r]emove, [s]ave, [a]bort : " confirm
+		case $confirm in
+			r | remove)
+				remove_log=1
+				echo remove $log_file
+				;;
+			s | save)
+				remove_log=0
+				;;
+			a | abort)
+				echo abort
+				echo try -s, --save-log or -h
+				exit
+				;;
+			*)
+				echo abort
+				echo "type [r]emove, [s]ave, [a]bort"
+				exit
+				;;
+		esac
+	else
+		echo remove $log_file
+	fi
+	if [ $remove_log -eq 0 ]; then
+		echo rotate $log_file
+		findword_log_rotate() {
+			# rotate file
+			local base_file=$1
+			local -i pre_number=$2
+			local -i log_number=$pre_number+1
+
+			# rotate file
+			local rotate_file="$base_file.$log_number"
+			if [ -e $rotate_file ]; then
+				# if file exists, rotate +1
+				findword_log_rotate $base_file $pre_number+1
+				if [ $? -eq 1 ]; then
+					return 1
+				fi
+			fi
+
+			# rename
+			local pre_file=$base_file
+			if [ $pre_number -gt 0 ]; then
+				pre_file="$pre_file.$pre_number"
+			fi
+			mv -i "$pre_file" "$rotate_file"
+
+			# error check
+			if [ -e "$pre_file" ]; then
+				return 1
+			fi
+			if [ ! -e "$rotate_file" ]; then
+				return 1
+			fi
+		}
+		findword_log_rotate $log_file 0
+		if [ $? -eq 1 ]; then
+			echo rotate error
+			exit
+		fi
+	fi
+fi
+
+# ignore list
+for ignore_pattern in ${ignore_paths[@]} ${ignore_path_appends[@]}; do
+	ignore_pattern="*/$ignore_pattern"
+	findword_add_find_option "(" "-path" "$ignore_pattern" "-prune" "," "!" "-path" "$ignore_pattern" ")"
+done
+for ignore_pattern in ${ignore_names[@]} ${ignore_name_appends[@]}; do
+	findword_add_find_option "!" "-name" "$ignore_pattern"
+done
+# ignore log file
+findword_add_find_option "!" "-path" "*/$log_file*"
+
+if [ $grep_mode -eq 0 ]; then
+	if [ $debug_mode -eq 0 ]; then
+		echo "/$grep_pattern/ > $log_file"
+		echo "/$grep_pattern/" > "$log_file"
+	fi
+	findword_add_grep_option "-e" "$grep_pattern"
+else
+	if [ $debug_mode -eq 0 ]; then
+		echo "use pattern file: $grep_pattern_file"
+		cat $grep_pattern_file > "$log_file"
+	fi
+	findword_add_grep_option "-f" "$grep_pattern_file"
+fi
+
+# file type
+findword_add_find_option "-type" "f"
+# mode
+findword_add_find_option "-perm" "-004"
+
+findword_add_grep_option "-H"
+findword_add_grep_option "-I"
+
+if [ $run_level -eq 0 ]; then
+	if [ $debug_mode -eq 0 ]; then
+		find . ${find_option_list[@]} -print0 | xargs -0 grep ${grep_option_list[@]} | tee -a "$log_file"
+		$rm_command "$log_file"
+	else
+		echo 'find . '${find_option_list[@]}' -print0 | xargs -0 grep '${grep_option_list[@]}' | tee -a '"$log_file"
+	fi
+else
+	if [ $debug_mode -eq 1 ]; then
+		echo find . ${find_option_list[@]}
+	fi
+	find . ${find_option_list[@]}
+fi
